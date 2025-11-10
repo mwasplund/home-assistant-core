@@ -42,6 +42,8 @@ from homeassistant.const import (
 from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.helpers import (
     config_validation as cv,
+    device_registry as dr,
+    entity_registry as er,
     event as event_helper,
     state as state_helper,
 )
@@ -77,13 +79,16 @@ from .const import (
     CONF_SSL_CA_CERT,
     CONF_TAGS,
     CONF_TAGS_ATTRIBUTES,
+    CONF_TAGS_DEVICE_PROPERTIES,
     CONNECTION_ERROR,
     DEFAULT_API_VERSION,
     DEFAULT_HOST_V2,
     DEFAULT_MEASUREMENT_ATTR,
     DEFAULT_SSL_V2,
+    DEVICE_PREFIX,
     DOMAIN,
     EVENT_NEW_STATE,
+    FRIENDLY_NAME,
     INFLUX_CONF_FIELDS,
     INFLUX_CONF_MEASUREMENT,
     INFLUX_CONF_ORG,
@@ -91,6 +96,7 @@ from .const import (
     INFLUX_CONF_TAGS,
     INFLUX_CONF_TIME,
     INFLUX_CONF_VALUE,
+    MISSING_DEVICE_MESSAGE,
     QUERY_ERROR,
     QUEUE_BACKLOG_SECONDS,
     RE_DECIMAL,
@@ -177,6 +183,9 @@ _INFLUX_BASE_SCHEMA = INCLUDE_EXCLUDE_BASE_FILTER_SCHEMA.extend(
         vol.Optional(CONF_TAGS_ATTRIBUTES, default=[]): vol.All(
             cv.ensure_list, [cv.string]
         ),
+        vol.Optional(CONF_TAGS_DEVICE_PROPERTIES, default=[]): vol.All(
+            cv.ensure_list, [cv.string]
+        ),
         vol.Optional(CONF_IGNORE_ATTRIBUTES, default=[]): vol.All(
             cv.ensure_list, [cv.string]
         ),
@@ -204,11 +213,12 @@ CONFIG_SCHEMA = vol.Schema(
 )
 
 
-def _generate_event_to_json(conf: dict) -> Callable[[Event], dict[str, Any] | None]:
+def _generate_event_to_json(conf: dict, hass: HomeAssistant) -> Callable[[Event], dict[str, Any] | None]:
     """Build event to json converter and add to config."""
     entity_filter = convert_include_exclude_filter(conf)
     tags = conf.get(CONF_TAGS)
     tags_attributes: list[str] = conf[CONF_TAGS_ATTRIBUTES]
+    tags_device_properties: list[str] = conf[CONF_TAGS_DEVICE_PROPERTIES]
     default_measurement = conf.get(CONF_DEFAULT_MEASUREMENT)
     measurement_attr: str = conf[CONF_MEASUREMENT_ATTR]
     override_measurement = conf.get(CONF_OVERRIDE_MEASUREMENT)
@@ -218,6 +228,9 @@ def _generate_event_to_json(conf: dict) -> Callable[[Event], dict[str, Any] | No
         conf[CONF_COMPONENT_CONFIG_DOMAIN],
         conf[CONF_COMPONENT_CONFIG_GLOB],
     )
+
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
 
     def event_to_json(event: Event) -> dict[str, Any] | None:
         """Convert event into json in format Influx expects."""
@@ -316,6 +329,24 @@ def _generate_event_to_json(conf: dict) -> Callable[[Event], dict[str, Any] | No
                 with suppress(KeyError, TypeError):
                     if not math.isfinite(json[INFLUX_CONF_FIELDS][key]):
                         del json[INFLUX_CONF_FIELDS][key]
+
+        # Check for device property tags if requested
+        if tags_device_properties:
+            entry = entity_registry.async_get(state.entity_id)
+            if entry:
+                device_id = entry.device_id
+                device = device_registry.async_get(device_id)
+                if device:
+                    # Check for custom friendly name reference
+                    if FRIENDLY_NAME in tags_device_properties:
+                        name = device.name_by_user or device.name
+                        json[INFLUX_CONF_TAGS][f'{DEVICE_PREFIX}{FRIENDLY_NAME}'] = name
+                    # Map existing properties to tags
+                    for key, value in device.dict_repr.items():
+                        if key in tags_device_properties:
+                            json[INFLUX_CONF_TAGS][f'{DEVICE_PREFIX}{key}'] = value
+            else:
+                _LOGGER.warning(MISSING_DEVICE_MESSAGE, state.entity_id)
 
         json[INFLUX_CONF_TAGS].update(tags)
 
@@ -494,7 +525,7 @@ def setup(hass: HomeAssistant, config: ConfigType) -> bool:
         )
         return True
 
-    event_to_json = _generate_event_to_json(conf)
+    event_to_json = _generate_event_to_json(conf, hass)
     max_tries = conf.get(CONF_RETRY_COUNT)
     instance = hass.data[DOMAIN] = InfluxThread(hass, influx, event_to_json, max_tries)
     instance.start()

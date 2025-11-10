@@ -26,6 +26,7 @@ CONF_DEFAULT_MEASUREMENT = "default_measurement"
 CONF_MEASUREMENT_ATTR = "measurement_attr"
 CONF_OVERRIDE_MEASUREMENT = "override_measurement"
 CONF_TAGS_ATTRIBUTES = "tags_attributes"
+CONF_TAGS_DEVICE_PROPERTIES = "tags_device_properties"
 CONF_COMPONENT_CONFIG = "component_config"
 CONF_COMPONENT_CONFIG_GLOB = "component_config_glob"
 CONF_COMPONENT_CONFIG_DOMAIN = "component_config_domain"
@@ -83,6 +84,8 @@ LANGUAGE_FLUX = "flux"
 TEST_QUERY_V1 = "SHOW DATABASES;"
 TEST_QUERY_V2 = "buckets()"
 CODE_INVALID_INPUTS = 400
+FRIENDLY_NAME = "friendly_name"
+DEVICE_PREFIX = "device_"
 
 MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=10)
 
@@ -118,6 +121,7 @@ QUERY_ERROR = (
 )
 RETRY_MESSAGE = f"%s Retrying in {RETRY_INTERVAL} seconds."
 CATCHING_UP_MESSAGE = "Catching up, dropped %d old events."
+MISSING_DEVICE_MESSAGE = "No device for entity: %s."
 RESUMED_MESSAGE = "Resumed, lost %d events."
 WROTE_MESSAGE = "Wrote %d events."
 RUNNING_QUERY_MESSAGE = "Running query: %s."
