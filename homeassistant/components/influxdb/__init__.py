@@ -213,146 +213,24 @@ CONFIG_SCHEMA = vol.Schema(
 )
 
 
-def _generate_event_to_json(conf: dict, hass: HomeAssistant) -> Callable[[Event], dict[str, Any] | None]:
-    """Build event to json converter and add to config."""
-    entity_filter = convert_include_exclude_filter(conf)
-    tags = conf.get(CONF_TAGS)
-    tags_attributes: list[str] = conf[CONF_TAGS_ATTRIBUTES]
-    tags_device_properties: list[str] = conf[CONF_TAGS_DEVICE_PROPERTIES]
-    default_measurement = conf.get(CONF_DEFAULT_MEASUREMENT)
-    measurement_attr: str = conf[CONF_MEASUREMENT_ATTR]
-    override_measurement = conf.get(CONF_OVERRIDE_MEASUREMENT)
-    global_ignore_attributes = set(conf[CONF_IGNORE_ATTRIBUTES])
-    component_config = EntityValues(
-        conf[CONF_COMPONENT_CONFIG],
-        conf[CONF_COMPONENT_CONFIG_DOMAIN],
-        conf[CONF_COMPONENT_CONFIG_GLOB],
-    )
+class InfluxEventConfigs:
+    """A container for all configuration parameters when processing events."""
 
-    entity_registry = er.async_get(hass)
-    device_registry = dr.async_get(hass)
-
-    def event_to_json(event: Event) -> dict[str, Any] | None:
-        """Convert event into json in format Influx expects."""
-        state: State | None = event.data.get(EVENT_NEW_STATE)
-        if (
-            state is None
-            or state.state in (STATE_UNKNOWN, "", STATE_UNAVAILABLE, None)
-            or not entity_filter(state.entity_id)
-        ):
-            return None
-
-        try:
-            _include_state = _include_value = False
-
-            _state_as_value = float(state.state)
-            _include_value = True
-        except ValueError:
-            try:
-                _state_as_value = float(state_helper.state_as_number(state))
-                _include_state = _include_value = True
-            except ValueError:
-                _include_state = True
-
-        include_uom = True
-        include_dc = True
-        entity_config = component_config.get(state.entity_id)
-        measurement = entity_config.get(CONF_OVERRIDE_MEASUREMENT)
-        if measurement in (None, ""):
-            if override_measurement:
-                measurement = override_measurement
-            else:
-                if measurement_attr == "entity_id":
-                    measurement = state.entity_id
-                elif measurement_attr == "domain__device_class":
-                    device_class = state.attributes.get("device_class")
-                    if device_class is None:
-                        # This entity doesn't have a device_class set, use only domain
-                        measurement = state.domain
-                    else:
-                        measurement = f"{state.domain}__{device_class}"
-                        include_dc = False
-                else:
-                    measurement = state.attributes.get(measurement_attr)
-                if measurement in (None, ""):
-                    if default_measurement:
-                        measurement = default_measurement
-                    else:
-                        measurement = state.entity_id
-                else:
-                    include_uom = measurement_attr != "unit_of_measurement"
-
-        json: dict[str, Any] = {
-            INFLUX_CONF_MEASUREMENT: measurement,
-            INFLUX_CONF_TAGS: {
-                CONF_DOMAIN: state.domain,
-                CONF_ENTITY_ID: state.object_id,
-            },
-            INFLUX_CONF_TIME: event.time_fired,
-            INFLUX_CONF_FIELDS: {},
-        }
-        if _include_state:
-            json[INFLUX_CONF_FIELDS][INFLUX_CONF_STATE] = state.state
-        if _include_value:
-            json[INFLUX_CONF_FIELDS][INFLUX_CONF_VALUE] = _state_as_value
-
-        ignore_attributes = set(entity_config.get(CONF_IGNORE_ATTRIBUTES, []))
-        ignore_attributes.update(global_ignore_attributes)
-        for key, value in state.attributes.items():
-            if key in tags_attributes:
-                json[INFLUX_CONF_TAGS][key] = value
-            elif (
-                (key != CONF_UNIT_OF_MEASUREMENT or include_uom)
-                and (key != "device_class" or include_dc)
-                and key not in ignore_attributes
-            ):
-                # If the key is already in fields
-                if key in json[INFLUX_CONF_FIELDS]:
-                    key = f"{key}_"
-                # Prevent column data errors in influxDB.
-                # For each value we try to cast it as float
-                # But if we cannot do it we store the value
-                # as string add "_str" postfix to the field key
-                try:
-                    json[INFLUX_CONF_FIELDS][key] = float(value)
-                except (ValueError, TypeError):
-                    new_key = f"{key}_str"
-                    new_value = str(value)
-                    json[INFLUX_CONF_FIELDS][new_key] = new_value
-
-                    if RE_DIGIT_TAIL.match(new_value):
-                        json[INFLUX_CONF_FIELDS][key] = float(
-                            RE_DECIMAL.sub("", new_value)
-                        )
-
-                # Infinity and NaN are not valid floats in InfluxDB
-                with suppress(KeyError, TypeError):
-                    if not math.isfinite(json[INFLUX_CONF_FIELDS][key]):
-                        del json[INFLUX_CONF_FIELDS][key]
-
-        # Check for device property tags if requested
-        if tags_device_properties:
-            entry = entity_registry.async_get(state.entity_id)
-            if entry:
-                device_id = entry.device_id
-                device = device_registry.async_get(device_id)
-                if device:
-                    # Check for custom friendly name reference
-                    if FRIENDLY_NAME in tags_device_properties:
-                        name = device.name_by_user or device.name
-                        json[INFLUX_CONF_TAGS][f'{DEVICE_PREFIX}{FRIENDLY_NAME}'] = name
-                    # Map existing properties to tags
-                    for key, value in device.dict_repr.items():
-                        if key in tags_device_properties:
-                            json[INFLUX_CONF_TAGS][f'{DEVICE_PREFIX}{key}'] = value
-            else:
-                _LOGGER.warning(MISSING_DEVICE_MESSAGE, state.entity_id)
-
-        json[INFLUX_CONF_TAGS].update(tags)
-
-        return json
-
-    return event_to_json
+    def __init__(self, conf: dict) -> None:
+        """Initialize event configs."""
+        self.entity_filter = convert_include_exclude_filter(conf)
+        self.tags = conf.get(CONF_TAGS)
+        self.tags_attributes: list[str] = conf[CONF_TAGS_ATTRIBUTES]
+        self.tags_device_properties: list[str] = conf[CONF_TAGS_DEVICE_PROPERTIES]
+        self.default_measurement = conf.get(CONF_DEFAULT_MEASUREMENT)
+        self.measurement_attr: str = conf[CONF_MEASUREMENT_ATTR]
+        self.override_measurement = conf.get(CONF_OVERRIDE_MEASUREMENT)
+        self.global_ignore_attributes = set(conf[CONF_IGNORE_ATTRIBUTES])
+        self.component_config = EntityValues(
+            conf[CONF_COMPONENT_CONFIG],
+            conf[CONF_COMPONENT_CONFIG_DOMAIN],
+            conf[CONF_COMPONENT_CONFIG_GLOB],
+        )
 
 
 @dataclass
@@ -525,9 +403,9 @@ def setup(hass: HomeAssistant, config: ConfigType) -> bool:
         )
         return True
 
-    event_to_json = _generate_event_to_json(conf, hass)
+    event_configs = InfluxEventConfigs(conf)
     max_tries = conf.get(CONF_RETRY_COUNT)
-    instance = hass.data[DOMAIN] = InfluxThread(hass, influx, event_to_json, max_tries)
+    instance = hass.data[DOMAIN] = InfluxThread(hass, influx, event_configs, max_tries)
     instance.start()
 
     def shutdown(event):
@@ -544,17 +422,19 @@ def setup(hass: HomeAssistant, config: ConfigType) -> bool:
 class InfluxThread(threading.Thread):
     """A threaded event handler class."""
 
-    def __init__(self, hass, influx, event_to_json, max_tries):
+    def __init__(self, hass, influx, event_configs, max_tries):
         """Initialize the listener."""
         threading.Thread.__init__(self, name=DOMAIN)
         self.queue: queue.SimpleQueue[threading.Event | tuple[float, Event] | None] = (
             queue.SimpleQueue()
         )
         self.influx = influx
-        self.event_to_json = event_to_json
+        self.event_configs = event_configs
         self.max_tries = max_tries
         self.write_errors = 0
         self.shutdown = False
+        self.entity_registry = er.async_get(hass)
+        self.device_registry = dr.async_get(hass)
         hass.bus.listen(EVENT_STATE_CHANGED, self._event_listener)
 
     @callback
@@ -567,6 +447,135 @@ class InfluxThread(threading.Thread):
     def batch_timeout():
         """Return number of seconds to wait for more events."""
         return BATCH_TIMEOUT
+
+    def process_device_properties(self, json: dict[str, Any], entity_id: str) -> None:
+        """Process device properties and add them to the JSON."""
+        entry = self.entity_registry.async_get(entity_id)
+        if entry:
+            device_id = entry.device_id
+            if device_id:
+                device = self.device_registry.async_get(device_id)
+                if device:
+                    # Check for custom friendly name reference
+                    if FRIENDLY_NAME in self.event_configs.tags_device_properties:
+                        name = device.name_by_user or device.name
+                        json[INFLUX_CONF_TAGS][f"{DEVICE_PREFIX}{FRIENDLY_NAME}"] = name
+                    # Map existing properties to tags
+                    for key, value in device.dict_repr.items():
+                        if key in self.event_configs.tags_device_properties:
+                            json[INFLUX_CONF_TAGS][f"{DEVICE_PREFIX}{key}"] = value
+        else:
+            _LOGGER.warning(MISSING_DEVICE_MESSAGE, entity_id)
+
+    def event_to_json(self, event: Event) -> dict[str, Any] | None:
+        """Convert event into json in format Influx expects."""
+        state: State | None = event.data.get(EVENT_NEW_STATE)
+        if (
+            state is None
+            or state.state in (STATE_UNKNOWN, "", STATE_UNAVAILABLE, None)
+            or not self.event_configs.entity_filter(state.entity_id)
+        ):
+            return None
+
+        try:
+            _include_state = _include_value = False
+
+            _state_as_value = float(state.state)
+            _include_value = True
+        except ValueError:
+            try:
+                _state_as_value = float(state_helper.state_as_number(state))
+                _include_state = _include_value = True
+            except ValueError:
+                _include_state = True
+
+        include_uom = True
+        include_dc = True
+        entity_config = self.event_configs.component_config.get(state.entity_id)
+        measurement = entity_config.get(CONF_OVERRIDE_MEASUREMENT)
+        if measurement in (None, ""):
+            if self.event_configs.override_measurement:
+                measurement = self.event_configs.override_measurement
+            else:
+                if self.event_configs.measurement_attr == "entity_id":
+                    measurement = state.entity_id
+                elif self.event_configs.measurement_attr == "domain__device_class":
+                    device_class = state.attributes.get("device_class")
+                    if device_class is None:
+                        # This entity doesn't have a device_class set, use only domain
+                        measurement = state.domain
+                    else:
+                        measurement = f"{state.domain}__{device_class}"
+                        include_dc = False
+                else:
+                    measurement = state.attributes.get(
+                        self.event_configs.measurement_attr
+                    )
+                if measurement in (None, ""):
+                    if self.event_configs.default_measurement:
+                        measurement = self.event_configs.default_measurement
+                    else:
+                        measurement = state.entity_id
+                else:
+                    include_uom = (
+                        self.event_configs.measurement_attr != "unit_of_measurement"
+                    )
+
+        json: dict[str, Any] = {
+            INFLUX_CONF_MEASUREMENT: measurement,
+            INFLUX_CONF_TAGS: {
+                CONF_DOMAIN: state.domain,
+                CONF_ENTITY_ID: state.object_id,
+            },
+            INFLUX_CONF_TIME: event.time_fired,
+            INFLUX_CONF_FIELDS: {},
+        }
+        if _include_state:
+            json[INFLUX_CONF_FIELDS][INFLUX_CONF_STATE] = state.state
+        if _include_value:
+            json[INFLUX_CONF_FIELDS][INFLUX_CONF_VALUE] = _state_as_value
+
+        ignore_attributes = set(entity_config.get(CONF_IGNORE_ATTRIBUTES, []))
+        ignore_attributes.update(self.event_configs.global_ignore_attributes)
+        for key, value in state.attributes.items():
+            if key in self.event_configs.tags_attributes:
+                json[INFLUX_CONF_TAGS][key] = value
+            elif (
+                (key != CONF_UNIT_OF_MEASUREMENT or include_uom)
+                and (key != "device_class" or include_dc)
+                and key not in ignore_attributes
+            ):
+                # If the key is already in fields
+                if key in json[INFLUX_CONF_FIELDS]:
+                    key = f"{key}_"
+                # Prevent column data errors in influxDB.
+                # For each value we try to cast it as float
+                # But if we cannot do it we store the value
+                # as string add "_str" postfix to the field key
+                try:
+                    json[INFLUX_CONF_FIELDS][key] = float(value)
+                except (ValueError, TypeError):
+                    new_key = f"{key}_str"
+                    new_value = str(value)
+                    json[INFLUX_CONF_FIELDS][new_key] = new_value
+
+                    if RE_DIGIT_TAIL.match(new_value):
+                        json[INFLUX_CONF_FIELDS][key] = float(
+                            RE_DECIMAL.sub("", new_value)
+                        )
+
+                # Infinity and NaN are not valid floats in InfluxDB
+                with suppress(KeyError, TypeError):
+                    if not math.isfinite(json[INFLUX_CONF_FIELDS][key]):
+                        del json[INFLUX_CONF_FIELDS][key]
+
+        # Check for device property tags if requested
+        if self.event_configs.tags_device_properties:
+            self.process_device_properties(json, state.entity_id)
+
+        json[INFLUX_CONF_TAGS].update(self.event_configs.tags)
+
+        return json
 
     def get_events_json(self):
         """Return a batch of events formatted for writing."""
